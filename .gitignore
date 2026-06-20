@@ -1,0 +1,22 @@
+# Data
+data/raw/
+data/processed/
+data/predictions/
+
+# Models
+models/*.joblib
+models/*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
