@@ -12,6 +12,7 @@ from pathlib import Path
 from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from xgboost import XGBClassifier
 from imputers import PercentileImputer
@@ -32,6 +33,8 @@ FEATURE_COLS = [
     "course_appearances", "course_avg_finish", "course_best_finish", "course_made_cut_rate",
     # World rank proxy
     "world_rank_proxy",
+    # Tournament context
+    "field_size", "cut_rate", "no_cut",
     # Data quality
     "has_stats",
 ]
@@ -42,6 +45,29 @@ TARGETS = {
     "top10": "top10",
     "top20": "top20",
 }
+
+
+def fit_platt_scaling(probs, actuals):
+    """Fit Platt scaling (logistic recalibration) on walk-forward predictions.
+    
+    Returns (A, B) parameters for sigmoid(A * logit(p) + B).
+    """
+    eps = 1e-7
+    clipped = np.clip(probs, eps, 1 - eps)
+    logit_p = np.log(clipped / (1 - clipped)).reshape(-1, 1)
+    
+    lr = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000)
+    lr.fit(logit_p, actuals)
+    return float(lr.coef_[0][0]), float(lr.intercept_[0])
+
+
+def platt_transform(p_raw, A, B):
+    """Apply Platt scaling: sigmoid(A * logit(p) + B)."""
+    eps = 1e-7
+    p = np.clip(p_raw, eps, 1 - eps)
+    logit_p = np.log(p / (1 - p))
+    z = A * logit_p + B
+    return 1 / (1 + np.exp(-z))
 
 
 def load_features():
@@ -167,6 +193,7 @@ def main(stats_only=False):
         print(f"  {len(df)} rows, seasons {sorted(df['season'].unique())}")
 
     all_results = {}
+    calibration_params = {}
 
     for target_col, name in TARGETS.items():
         print(f"\n{'='*50}")
@@ -196,6 +223,20 @@ def main(stats_only=False):
         all_test = pd.concat([r["test_df"] for r in wf_results], ignore_index=True)
         all_test.to_csv(DATA_DIR / f"predictions_{name}.csv", index=False)
 
+        # Fit Platt scaling on walk-forward predictions
+        raw_probs = all_test["pred_prob"].values
+        actuals = all_test[target_col].values
+        A, B = fit_platt_scaling(raw_probs, actuals)
+        calibration_params[name] = {"A": A, "B": B}
+        
+        # Show calibration improvement
+        cal_probs = platt_transform(raw_probs, A, B)
+        gap_before = np.mean(raw_probs) - np.mean(actuals)
+        gap_after = np.mean(cal_probs) - np.mean(actuals)
+        print(f"  Platt scaling: A={A:.4f}, B={B:.4f}")
+        print(f"  Mean predicted: {np.mean(raw_probs):.4%} -> {np.mean(cal_probs):.4%} (actual: {np.mean(actuals):.4%})")
+        print(f"  Calibration gap: {gap_before:+.4%} -> {gap_after:+.4%}")
+
         # Train production model on all data
         print(f"\n  Training production model...")
         prod_pipeline = train_production(df, target_col, stats_only=stats_only)
@@ -212,6 +253,7 @@ def main(stats_only=False):
         "feature_cols": FEATURE_COLS,
         "targets": list(TARGETS.keys()),
         "results": all_results,
+        "calibration": calibration_params,
     }
     with open(MODEL_DIR / "xgb_meta.json", "w") as f:
         json.dump(meta, f, indent=2)

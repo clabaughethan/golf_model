@@ -29,8 +29,9 @@ from build_features import (
     compute_world_rank_proxy,
 )
 from course_mapping import get_course_name
-from train import FEATURE_COLS
+from train import FEATURE_COLS, platt_transform
 from bankroll import recommend_bets, print_bets
+from tracking import save_picks, cross_market_confidence, print_confidence_picks
 
 
 def polite_get(url, params=None):
@@ -169,12 +170,19 @@ def build_prediction_features(leaderboard, stats, results, world_rank_all):
     wr_df["world_rank_proxy"] = wr_df["power_score"].rank(ascending=False, method="min")
     features = features.merge(wr_df[["player_name_norm", "world_rank_proxy"]], on="player_name_norm", how="left")
 
+    # --- Tournament context ---
+    features["field_size"] = len(features)
+    # No-cut detection: check if ESPN reports a cut line; if not found, assume no cut
+    # for now — this is set at prediction time
+    features["no_cut"] = 0  # default; override in main() if known
+
     return features
 
 
 def generate_picks(features, models, meta):
-    """Generate predictions for each target."""
+    """Generate predictions for each target, with Platt scaling calibration."""
     feature_cols = meta.get("feature_cols", FEATURE_COLS)
+    cal_params = meta.get("calibration", {})
     for col in feature_cols:
         if col not in features.columns:
             features[col] = np.nan
@@ -184,7 +192,16 @@ def generate_picks(features, models, meta):
 
     for target_name, pipeline in models.items():
         try:
-            probs = pipeline.predict_proba(X)[:, 1]
+            raw_probs = pipeline.predict_proba(X)[:, 1]
+            
+            # Apply Platt scaling if calibration params available
+            if target_name in cal_params:
+                A = cal_params[target_name]["A"]
+                B = cal_params[target_name]["B"]
+                probs = platt_transform(raw_probs, A, B)
+            else:
+                probs = raw_probs
+            
             predictions[f"p_{target_name}"] = probs
         except Exception as e:
             print(f"  Error predicting {target_name}: {e}")
@@ -234,6 +251,96 @@ def save_predictions(predictions, tournament_info):
     return out
 
 
+def build_all_picks(predictions, odds_df, min_edge=0.02):
+    """Build picks for every player x market with positive edge.
+    
+    Returns DataFrame with all picks, plus cross-market confidence info.
+    """
+    merged = predictions.merge(odds_df, on="player_name", how="inner")
+
+    markets = [
+        ("p_win", "win_odds", "Win"),
+        ("p_top5", "top5_odds", "Top 5"),
+        ("p_top10", "top10_odds", "Top 10"),
+        ("p_top20", "top20_odds", "Top 20"),
+    ]
+
+    all_picks = []
+    for _, row in merged.iterrows():
+        for prob_col, odds_col, market in markets:
+            if pd.isna(row.get(prob_col)) or pd.isna(row.get(odds_col)):
+                continue
+            if row[odds_col] <= 1:
+                continue
+            model_p = row[prob_col]
+            odds = row[odds_col]
+            implied = 100 / (odds + 100)
+            edge = model_p - implied
+            if edge > min_edge:
+                all_picks.append({
+                    "player_name": row["player_name"],
+                    "market": market,
+                    "model_prob": model_p,
+                    "odds": odds,
+                    "implied": implied,
+                    "edge": edge,
+                })
+
+    if not all_picks:
+        return pd.DataFrame()
+
+    picks_df = pd.DataFrame(all_picks)
+
+    # Add cross-market confidence info
+    conf = cross_market_confidence(predictions, odds_df, min_markets=2, min_edge=min_edge)
+    conf_map = {}
+    for _, row in conf.iterrows():
+        for b in row["markets"]:
+            conf_map[(row["player_name"], b["market"])] = {
+                "confidence_markets": row["n_markets"],
+                "total_edge": row["total_edge"],
+            }
+
+    picks_df["confidence_markets"] = picks_df.apply(
+        lambda r: conf_map.get((r["player_name"], r["market"]), {}).get("confidence_markets", 1), axis=1
+    )
+    picks_df["total_edge"] = picks_df.apply(
+        lambda r: conf_map.get((r["player_name"], r["market"]), {}).get("total_edge", r["edge"]), axis=1
+    )
+
+    return picks_df.sort_values(["confidence_markets", "edge"], ascending=[False, False])
+
+
+def print_all_picks(picks_df):
+    """Pretty-print all picks, grouped by cross-market vs single-market."""
+    if picks_df.empty:
+        print("No picks found.")
+        return
+
+    cm = picks_df[picks_df["confidence_markets"] >= 2]
+    sm = picks_df[picks_df["confidence_markets"] == 1]
+
+    if not cm.empty:
+        print(f"\n{'='*80}")
+        print(f"  CROSS-MARKET PICKS ({len(cm)} bets, {cm['player_name'].nunique()} players)")
+        print(f"{'='*80}")
+        print(f"\n{'Player':<22} {'Market':<8} {'Model':>7} {'Odds':>7} {'Edge':>7} {'Conf':>5}")
+        print("-" * 65)
+        for _, r in cm.iterrows():
+            print(f"{r['player_name']:<22} {r['market']:<8} {r['model_prob']:>6.1%} "
+                  f"{r['odds']:>7.0f} {r['edge']:>+6.1%} {int(r['confidence_markets']):>5}")
+
+    if not sm.empty:
+        print(f"\n{'='*80}")
+        print(f"  SINGLE-MARKET PICKS ({len(sm)} bets, {sm['player_name'].nunique()} players)")
+        print(f"{'='*80}")
+        print(f"\n{'Player':<22} {'Market':<8} {'Model':>7} {'Odds':>7} {'Edge':>7}")
+        print("-" * 60)
+        for _, r in sm.sort_values("edge", ascending=False).iterrows():
+            print(f"{r['player_name']:<22} {r['market']:<8} {r['model_prob']:>6.1%} "
+                  f"{r['odds']:>7.0f} {r['edge']:>+6.1%}")
+
+
 def main(event_id=None, bankroll=None, odds_file=None):
     print("Loading models...")
     models, meta = load_models()
@@ -281,13 +388,25 @@ def main(event_id=None, bankroll=None, odds_file=None):
     print_picks(predictions, info)
     save_predictions(predictions, info)
 
-    # Bankroll management
+    # Bankroll management and pick tracking
     if odds_file:
         odds_df = pd.read_csv(odds_file)
-        if bankroll is None:
-            bankroll = 1000
-        bets = recommend_bets(predictions, odds_df, bankroll=bankroll)
-        print_bets(bets, bankroll)
+
+        # Build all picks with cross-market confidence
+        print("\nBuilding picks...")
+        picks_df = build_all_picks(predictions, odds_df)
+        if not picks_df.empty:
+            print_all_picks(picks_df)
+
+            # Save for tracking
+            tournament_name = info.get("event_name", "unknown")
+            date_str = info.get("date", "")[:10]
+            save_picks(picks_df, tournament_name, info.get("event_id", ""), date_str)
+
+        # Bet sizing (optional)
+        if bankroll:
+            bets = recommend_bets(predictions, odds_df, bankroll=bankroll)
+            print_bets(bets, bankroll)
 
 
 if __name__ == "__main__":

@@ -291,6 +291,13 @@ def main():
     base = results[["player_id", "event_id", "event_name", "event_date", "season",
                      "player_name", "player_name_norm", "country"]].copy()
 
+    # --- Field size and cut format ---
+    field_sizes = results.groupby("event_id").size().rename("field_size")
+    cut_rates = results.groupby("event_id")["made_cut"].mean().rename("cut_rate")
+    base = base.merge(field_sizes, on="event_id", how="left")
+    base = base.merge(cut_rates, on="event_id", how="left")
+    base["no_cut"] = (base["cut_rate"] > 0.8).astype(int)
+
     # Merge rolling features
     base = base.merge(rolling, on=["player_id", "event_id", "season"], how="left")
 
