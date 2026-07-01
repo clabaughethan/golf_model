@@ -10,7 +10,7 @@ Track lessons learned each week for model tuning.
 
 **Picks:** 22 total (14 cross-market, 8 single-market)
 **Results:** 1/22 won (Ben Griffin top-20 at +110)
-**P/L:** +$88 on $22 staked (+400% ROI)
+**P/L:** -6.49u on 10.69u staked (-60.7% ROI)
 
 ### What worked
 - Ben Griffin top-20 (71.7% model, +110 odds) — model's highest-confidence pick hit. Market had him at 47.6%, model at 71.7%. The 24% edge was real.
@@ -30,6 +30,7 @@ Track lessons learned each week for model tuning.
 4. **Small-field no-cut events may need separate treatment.** Travelers was 72 players, no cut. Top-20 base rate is ~30%, not ~13%. The model's field_size feature helps but may not be enough.
 5. **One tournament is not a sample.** Need 20+ weeks before drawing statistical conclusions. This could be pure variance.
 6. **The model is a ranking tool, not a probability tool.** It's better at "Player A > Player B" than "Player A = X%."
+7. **Unit sizing should cap long shots.** Edge-based sizing without probability caps leads to over-betting on unlikely outcomes. New system: >50% prob = max 2u, 25-50% = max 1u, 10-25% = max 0.5u, <10% = max 0.25u.
 
 ### Open questions
 - Does the model perform better on large-field cut events vs small-field no-cut?

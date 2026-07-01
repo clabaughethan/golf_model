@@ -15,6 +15,14 @@ PICKS_DIR = DATA_DIR / "processed"
 RESULTS_DIR = DATA_DIR / "raw"
 
 
+def american_to_decimal(odds):
+    """Convert American odds to decimal odds."""
+    if odds > 0:
+        return 1 + odds / 100
+    else:
+        return 1 + 100 / abs(odds)
+
+
 def save_picks(picks_df, tournament_name, event_id, date_str=None):
     """Save picks to CSV for later scoring."""
     if date_str is None:
@@ -78,15 +86,24 @@ def score_picks(picks_path, results_df):
         return None
 
     scored["won"] = scored.apply(check_win, axis=1)
-    scored["profit"] = scored.apply(
-        lambda r: r["bet_amount"] * (r["odds"] - 1) if r["won"] else -r["bet_amount"]
+
+    # Use units column if present, otherwise bet_amount, otherwise 1 unit
+    if "units" in scored.columns:
+        scored["units"] = scored["units"].fillna(0)
+    elif "bet_amount" in scored.columns:
+        scored["units"] = scored["bet_amount"]
+    else:
+        scored["units"] = 1.0
+
+    scored["profit_units"] = scored.apply(
+        lambda r: r["units"] * (american_to_decimal(r["odds"]) - 1) if r["won"] else -r["units"]
         if pd.notna(r["won"]) else 0, axis=1
     )
 
     return scored
 
 
-def print_scorecard(scored_df, bankroll=1000):
+def print_scorecard(scored_df):
     """Print a scorecard for a tournament."""
     finished = scored_df[scored_df["won"].notna()].copy()
     if finished.empty:
@@ -97,26 +114,27 @@ def print_scorecard(scored_df, bankroll=1000):
     print(f"  SCORECARD")
     print(f"{'='*90}")
 
-    print(f"\n{'Player':<22} {'Market':<8} {'Model':>7} {'Odds':>7} {'Result':>8} {'P/L':>10}")
-    print("-" * 70)
+    print(f"\n{'Player':<22} {'Market':<8} {'Model':>7} {'Odds':>7} {'Units':>6} {'Result':>8} {'P/L':>10}")
+    print("-" * 75)
 
     for _, row in finished.iterrows():
         result = "WIN" if row["won"] else "LOSS"
-        pnl = row["profit"]
-        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        print(f"{row['player_name']:<22} {row['market']:<8} {row['model_prob']:>7} "
-              f"{row['odds']:>7.0f} {result:>8} {pnl_str:>10}")
+        pnl = row["profit_units"]
+        pnl_str = f"+{pnl:.2f}u" if pnl >= 0 else f"{pnl:.2f}u"
+        print(f"{row['player_name']:<22} {row['market']:<8} {row['model_prob']:>6.1%} "
+              f"{row['odds']:>7.0f} {row['units']:>5.2f} {result:>8} {pnl_str:>10}")
 
-    total_pnl = finished["profit"].sum()
+    total_pnl = finished["profit_units"].sum()
     n_wins = finished["won"].sum()
     n_bets = len(finished)
-    total_staked = finished["bet_amount"].sum()
+    total_staked = finished["units"].sum()
 
-    print("-" * 70)
-    pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
-    print(f"{'TOTAL':<22} {'':8} {'':7} {'':7} {n_wins:.0f}/{n_bets:.0f} {pnl_str:>10}")
-    print(f"  Staked: ${total_staked:.2f} | ROI: {total_pnl/total_staked*100:+.1f}%")
-    print(f"  Win rate: {n_wins/n_bets:.1%} (expected: {(finished['model_prob'].apply(lambda x: float(x.rstrip('%'))/100)).mean():.1%})")
+    print("-" * 75)
+    pnl_str = f"+{total_pnl:.2f}u" if total_pnl >= 0 else f"{total_pnl:.2f}u"
+    print(f"{'TOTAL':<22} {'':8} {'':7} {'':7} {total_staked:>5.2f} {n_wins:.0f}/{n_bets:.0f} {pnl_str:>10}")
+    print(f"  Staked: {total_staked:.2f}u | ROI: {total_pnl/total_staked*100:+.1f}%")
+    exp_rate = finished["model_prob"].apply(lambda x: float(str(x).rstrip('%')) / 100 if isinstance(x, str) else x).mean()
+    print(f"  Win rate: {n_wins/n_bets:.1%} (expected: {exp_rate:.1%})")
 
 
 def load_all_picks():
