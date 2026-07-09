@@ -79,6 +79,8 @@ def get_leaderboard(event_id):
 
     players = []
     for ev in data["events"]:
+        if ev.get("id") != event_id:
+            continue
         for comp in ev.get("competitions", []):
             for c in comp.get("competitors", []):
                 athlete = c.get("athlete", {})
@@ -125,13 +127,15 @@ def build_prediction_features(leaderboard, stats, results, world_rank_all):
         id_to_name = results[["player_id", "player_name_norm"]].drop_duplicates("player_id")
         rolling = rolling.merge(id_to_name, on="player_id", how="left")
         # Get latest rolling for each player
-        latest_rolling = rolling.sort_values("event_id").groupby("player_name_norm").last().reset_index()
+        latest_rolling = rolling.sort_values("event_date").groupby("player_name_norm").last().reset_index()
         roll_cols = ["player_name_norm", "made_cut_l", "avg_finish_l", "top5_l", "top10_l", "top20_l", "events_played_l"]
         features = features.merge(latest_rolling[roll_cols], on="player_name_norm", how="left")
 
-    for col in ["made_cut_l", "avg_finish_l", "top5_l", "top10_l", "top20_l", "events_played_l"]:
+    for col in ["made_cut_l", "top5_l", "top10_l", "top20_l", "events_played_l"]:
         if col in features.columns:
             features[col] = features[col].fillna(0)
+    if "avg_finish_l" in features.columns:
+        features["avg_finish_l"] = features["avg_finish_l"].fillna(99.0)
 
     # --- Course history ---
     for col in ["course_appearances", "course_avg_finish", "course_best_finish", "course_made_cut_rate"]:
@@ -206,6 +210,16 @@ def generate_picks(features, models, meta):
         except Exception as e:
             print(f"  Error predicting {target_name}: {e}")
             predictions[f"p_{target_name}"] = np.nan
+
+    # Dampen probabilities for players with limited event history
+    if "events_played_l" in features.columns:
+        n_events = features["events_played_l"].values
+        for target_name in models:
+            col = f"p_{target_name}"
+            if col in predictions.columns:
+                damp = np.clip(n_events / 10, 0.2, 1.0)
+                damp[n_events == 0] = 0.2
+                predictions[col] = predictions[col] * damp
 
     if "p_win" in predictions.columns:
         predictions = predictions.sort_values("p_win", ascending=False)

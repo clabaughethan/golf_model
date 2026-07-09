@@ -21,7 +21,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
 OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
 
 # Rolling window sizes
-ROLLING_WINDOW = 12  # last N events
+ROLLING_WINDOW = 5  # last N events (shorter to capture recent form)
 
 
 def normalize_name(name):
@@ -47,7 +47,10 @@ def load_all_results():
     for p in sorted(DATA_DIR.glob("results_*.csv")):
         if p.name == "results_all.csv":
             continue
-        year = int(p.stem.split("_")[1])
+        try:
+            year = int(p.stem.split("_")[1])
+        except (ValueError, IndexError):
+            continue
         df = pd.read_csv(p)
         df["season"] = year
         dfs.append(df)
@@ -59,7 +62,10 @@ def load_all_stats():
     for p in sorted(DATA_DIR.glob("stats_*.csv")):
         if p.name == "stats_all.csv":
             continue
-        year = int(p.stem.split("_")[1])
+        try:
+            year = int(p.stem.split("_")[1])
+        except (ValueError, IndexError):
+            continue
         df = pd.read_csv(p)
         df["season"] = year
         dfs.append(df)
@@ -100,7 +106,7 @@ def compute_rolling_features(results):
         grp["top10_l"] = (grp["pos_numeric"] <= 10).rolling(ROLLING_WINDOW, min_periods=1).mean()
         grp["top20_l"] = (grp["pos_numeric"] <= 20).rolling(ROLLING_WINDOW, min_periods=1).mean()
         grp["events_played_l"] = range(1, len(grp) + 1)
-        roll_features.append(grp[["player_id", "event_id", "season",
+        roll_features.append(grp[["player_id", "event_id", "event_date", "season",
                                    "made_cut_l", "avg_finish_l", "top5_l", "top10_l", "top20_l",
                                    "events_played_l"]])
 
