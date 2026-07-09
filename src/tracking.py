@@ -200,16 +200,17 @@ def running_stats():
     print(f"{'TOTAL':<10} {total_n:>6} {total_wins:>6.0f} {total_wins/total_n:>6.1%} {total_exp:>6.1%} {pnl_str:>10} {total_roi:>+7.1f}%")
 
 
-def cross_market_confidence(predictions, odds_df, min_markets=2, min_edge=0.02):
+def cross_market_confidence(predictions, odds_df, min_markets=2, min_x=2.0):
     """Score players by cross-market confidence.
     
-    A player who the model likes in multiple markets is a more confident pick.
+    Uses x-factor (model_p / implied_p) to find mispriced markets.
+    A player the model likes across multiple markets is a more confident pick.
     
     Args:
         predictions: DataFrame with player_name, p_win, p_top5, p_top10, p_top20
         odds_df: DataFrame with player_name, win_odds, top5_odds, top10_odds, top20_odds
         min_markets: minimum markets with positive edge to qualify
-        min_edge: minimum edge per market
+        min_x: minimum x-factor (model_p / implied_p) to qualify
     
     Returns:
         DataFrame with confidence scores
@@ -225,33 +226,33 @@ def cross_market_confidence(predictions, odds_df, min_markets=2, min_edge=0.02):
 
     scores = []
     for _, row in merged.iterrows():
-        edges = []
-        market_bets = []
+        xs, market_bets = [], []
         for prob_col, odds_col, market_name in markets:
-            if pd.isna(row.get(prob_col)) or pd.isna(row.get(odds_col)):
-                continue
-            if row[odds_col] <= 1:
+            if pd.isna(row.get(prob_col)) or pd.isna(row.get(odds_col)) or row[odds_col] == 0:
                 continue
             model_p = row[prob_col]
-            implied = 100 / (row[odds_col] + 100)
-            edge = model_p - implied
-            if edge > min_edge:
-                edges.append(edge)
+            odds_val = row[odds_col]
+            if odds_val > 0:
+                implied = 100 / (odds_val + 100)
+            else:
+                implied = abs(odds_val) / (abs(odds_val) + 100)
+            x = model_p / implied if implied > 0 else 0
+            if x >= min_x:
+                xs.append(x)
                 market_bets.append({
                     "market": market_name,
                     "model_prob": model_p,
-                    "odds": row[odds_col],
+                    "odds": odds_val,
                     "implied": implied,
-                    "edge": edge,
+                    "x": x,
                 })
 
-        if len(edges) >= min_markets:
+        if len(xs) >= min_markets:
             scores.append({
                 "player_name": row["player_name"],
-                "n_markets": len(edges),
-                "total_edge": sum(edges),
-                "avg_edge": np.mean(edges),
-                "max_edge": max(edges),
+                "n_markets": len(xs),
+                "avg_x": np.mean(xs),
+                "max_x": max(xs),
                 "markets": market_bets,
             })
 
@@ -259,8 +260,7 @@ def cross_market_confidence(predictions, odds_df, min_markets=2, min_edge=0.02):
         return pd.DataFrame()
 
     df = pd.DataFrame(scores)
-    # Rank by: number of markets first, then total edge
-    df = df.sort_values(["n_markets", "total_edge"], ascending=[False, False])
+    df = df.sort_values(["n_markets", "avg_x"], ascending=[False, False])
     return df
 
 
@@ -274,12 +274,11 @@ def print_confidence_picks(conf_df, top_n=10):
     print(f"  CROSS-MARKET CONFIDENCE PICKS")
     print(f"{'='*90}")
 
-    print(f"\n{'Player':<22} {'#Mkt':>5} {'Total Edge':>10} {'Avg Edge':>9} {'Markets':>30}")
+    print(f"\n{'Player':<22} {'#Mkt':>5} {'AvgX':>7} {'MaxX':>7} {'Markets':>40}")
     print("-" * 90)
 
     for _, row in conf_df.head(top_n).iterrows():
         mkt_str = " + ".join(
-            f"{b['market']}({b['edge']:+.0%})" for b in row["markets"]
+            f"{b['market']}({b['x']:.1f}x)" for b in row["markets"]
         )
-        print(f"{row['player_name']:<22} {row['n_markets']:>5} {row['total_edge']:>9.1%} "
-              f"{row['avg_edge']:>8.1%} {mkt_str:>30}")
+        print(f"{row['player_name']:<22} {row['n_markets']:>5} {row['avg_x']:>5.1f}x {row['max_x']:>5.1f}x  {mkt_str}")

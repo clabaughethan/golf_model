@@ -265,10 +265,10 @@ def save_predictions(predictions, tournament_info):
     return out
 
 
-def build_all_picks(predictions, odds_df, min_edge=0.02):
-    """Build picks for every player x market with positive edge.
+def build_all_picks(predictions, odds_df, min_edge=0.02, min_x=2.0):
+    """Build picks using x-factor (model_p / implied_p).
     
-    Returns DataFrame with all picks, plus cross-market confidence info.
+    Returns DataFrame with all picks plus cross-market confidence info.
     """
     merged = predictions.merge(odds_df, on="player_name", how="inner")
 
@@ -279,24 +279,27 @@ def build_all_picks(predictions, odds_df, min_edge=0.02):
         ("p_top20", "top20_odds", "Top 20"),
     ]
 
+    def implied_from_odds(ov):
+        return 100/(ov+100) if ov > 0 else abs(ov)/(abs(ov)+100)
+
     all_picks = []
     for _, row in merged.iterrows():
         for prob_col, odds_col, market in markets:
-            if pd.isna(row.get(prob_col)) or pd.isna(row.get(odds_col)):
-                continue
-            if row[odds_col] <= 1:
+            if pd.isna(row.get(prob_col)) or pd.isna(row.get(odds_col)) or row[odds_col] == 0:
                 continue
             model_p = row[prob_col]
             odds = row[odds_col]
-            implied = 100 / (odds + 100)
+            implied = implied_from_odds(odds)
             edge = model_p - implied
-            if edge > min_edge:
+            x = model_p / implied if implied > 0 else 0
+            if x >= min_x:
                 all_picks.append({
                     "player_name": row["player_name"],
                     "market": market,
                     "model_prob": model_p,
                     "odds": odds,
                     "implied": implied,
+                    "x": x,
                     "edge": edge,
                 })
 
@@ -306,23 +309,20 @@ def build_all_picks(predictions, odds_df, min_edge=0.02):
     picks_df = pd.DataFrame(all_picks)
 
     # Add cross-market confidence info
-    conf = cross_market_confidence(predictions, odds_df, min_markets=2, min_edge=min_edge)
+    conf = cross_market_confidence(predictions, odds_df, min_markets=2, min_x=min_x)
     conf_map = {}
     for _, row in conf.iterrows():
         for b in row["markets"]:
             conf_map[(row["player_name"], b["market"])] = {
                 "confidence_markets": row["n_markets"],
-                "total_edge": row["total_edge"],
+                "avg_x": row["avg_x"],
             }
 
     picks_df["confidence_markets"] = picks_df.apply(
         lambda r: conf_map.get((r["player_name"], r["market"]), {}).get("confidence_markets", 1), axis=1
     )
-    picks_df["total_edge"] = picks_df.apply(
-        lambda r: conf_map.get((r["player_name"], r["market"]), {}).get("total_edge", r["edge"]), axis=1
-    )
 
-    return picks_df.sort_values(["confidence_markets", "edge"], ascending=[False, False])
+    return picks_df.sort_values(["confidence_markets", "x"], ascending=[False, False])
 
 
 def print_all_picks(picks_df):
